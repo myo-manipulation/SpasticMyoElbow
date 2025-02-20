@@ -2,7 +2,7 @@
 # In this script, we conducted a series of experiments to manually select the optimal spasticity model.
 # This script is based on the test_spasticity_model.py script, but we disabled the function of generating and following trajectories.
 # Instead, the trajectory is loaded from the reference dataset.
-# The spasticiy model is improved so multiple types of feedback can be activated at the same time.
+# The spasticiy model is tested with different gains and different types of sensory feedback, but only one type of sensory feedback is tested in each experiment.
 ##################################################
 
 import os
@@ -36,6 +36,7 @@ class Simulation():
         self.forearm_id = self.model.body_name2id("r_ulna_radius_hand")
 
         # custom controller
+        self.control_mode = 'none'
         self.KP = 1
         self.KI = 0
         self.KD = 0
@@ -53,12 +54,6 @@ class Simulation():
         self.compensation = False
         self.passiveAngle = []
         self.passiveTorque = []
-        
-        # muscle parameters for normalising the muscle feedback
-        self.starting_length = np.array([0.0, 0.0, 0.0, 0.36, 0.28, 0.12])
-        self.stretch_length = np.array([0.0, 0.0, 0.0, 0.054, 0.054, 0.024])
-        self.max_velocity = np.array([0.0, 0.0, 0.0, 0.18, 0.20, 0.13])
-        self.max_force = np.array([0.0, 0.0, 0.0, 729, 508, 1171])
         
     @property
     def dt(self):
@@ -154,7 +149,7 @@ class Simulation():
         obs_dict['act'] = self.data.act[:].copy() if self.model.na>0 else np.zeros_like(obs_dict['qpos'])
         obs_dict['m_length'] = self.data.actuator_length[1:].copy()
         obs_dict['m_velocity'] = self.data.actuator_velocity[1:].copy()
-        obs_dict['m_force'] = -self.data.actuator_force[1:].copy()
+        obs_dict['m_force'] = -self.data.actuator_force[1:].copy()*np.array([0.0, 0.0, 0.0, 0.0005, 0.0005, 0.0005])
         obs_dict['motor_force'] = -self.torque
         return obs_dict
         
@@ -167,7 +162,7 @@ class Simulation():
             self.timeVals.append(info['time'])
             self.jointPos.append(info['qpos'])
             self.muscleAct.append(info['act'])
-            self.muscleLen.append(info['m_length'])
+            self.muscleLen.append(info['m_length']) #-self.muscleLen[0] if len(self.muscleLen) > 0 else info['m_length'])
             self.muscleVel.append(info['m_velocity'])
             self.muscleForce.append(info['m_force'])
             self.torques.append(info['motor_force'])
@@ -250,17 +245,71 @@ class Simulation():
             self.filtered_vd_error = self.alpha * vel_d_error + (1 - self.alpha) * self.filtered_vd_error
             
         # dual loop control of velocity and position
-        self.alpha = 0.1
-        # position loop control
-        target_pos = self.reference_trajectory(current_t, 0)
-        pos_error = target_pos - current_pos
-        self.p_errors.append(pos_error)
-        target_vel = pos_error*30 - 0.01*self.filtered_d_error + 100*np.sum(self.p_errors)*self.dt
+        if self.control_mode == 'dual_new':
+            self.alpha = 0.1
+            # position loop control
+            target_pos = self.reference_trajectory(current_t, 0)
+            pos_error = target_pos - current_pos
+            self.p_errors.append(pos_error)
+            # pid tuned based on the modified model: target_vel = pos_error*40 + 0.*d_error + 400*np.sum(self.p_errors)*self.dt
+            # pid tuned based on the original model without passive force compensation: target_vel = pos_error*30 + 0.01*self.filtered_d_error + 100*np.sum(self.p_errors)*self.dt
+            # pid tuned based on the original model with passive force compensation: 
+            target_vel = pos_error*30 - 0.01*self.filtered_d_error + 100*np.sum(self.p_errors)*self.dt
+            
+            # velocity loop control
+            vel_error = target_vel - current_vel
+            self.v_errors.append(vel_error)
+            # pid tuned based on the modified model: self.torque = 50*vel_error + 0.01*vel_d_error + 400*np.sum(self.v_errors)*self.dt
+            # pid tuned based on the original model without passive force compensation: self.torque = 5*vel_error - 0.01*self.filtered_vd_error + 400*np.sum(self.v_errors)*self.dt
+            # pid tuned based on the original model with passive force compensation: 
+            self.torque = 5*vel_error - 0.01*self.filtered_vd_error + 400*np.sum(self.v_errors)*self.dt
+            
+        elif self.control_mode == 'dual_old':
+            self.alpha = 0.1
+            target_pos = self.reference_trajectory(current_t, 0)
+            pos_error = target_pos - current_pos
+            self.p_errors.append(pos_error)
+            target_vel = pos_error/self.dt
+            vel_error = target_vel - current_vel
+            self.v_errors.append(vel_error)
+            # pid tuned based on the original model without passive force compensation: 
+            self.torque = 2*vel_error - 0.01*self.filtered_vd_error + 1*np.sum(self.p_errors)*self.dt
         
-        # velocity loop control
-        vel_error = target_vel - current_vel
-        self.v_errors.append(vel_error)
-        self.torque = 5*vel_error - 0.01*self.filtered_vd_error + 400*np.sum(self.v_errors)*self.dt
+        # joint control of velocity and position       
+        elif self.control_mode == 'joint':
+            target_pos, target_vel, status = self.minijerk_trajectory(current_t, self.start_time, self.motion_duration, self.stretch)
+            # target_pos, target_vel, status = self.ramphold_trajectory(current_t, self.start_time, self.motion_duration, self.stretch)
+            error = target_pos - current_pos
+            self.p_errors.append(error)
+            # self.torque = self.KP*error + self.KD*(target_vel - current_vel) + self.KI*np.sum(self.errors)*self.dt
+            self.torque = 200*error + 50*(target_vel - current_vel) + 200*np.sum(self.p_errors)*self.dt
+
+        # position control
+        elif self.control_mode == 'position':
+            self.alpha = 0.1
+            # target_pos, target_vel, status = self.minijerk_trajectory(current_t, self.start_time, self.motion_duration, self.stretch)
+            # target_pos, target_vel, status = self.ramphold_trajectory(current_t, self.start_time, self.motion_duration, self.stretch)
+            target_pos = self.reference_trajectory(current_t, 0)
+            pos_error = target_pos - current_pos
+            self.p_errors.append(pos_error)
+            target_vel = pos_error/self.dt
+            vel_error = target_vel - current_vel
+            self.v_errors.append(vel_error)
+            # self.torque = self.KP*error + self.KD*d_error + self.KI*np.sum(self.errors)*self.dt
+            # pid tuned based on the modified model: self.torque = 100*pos_error + 5*d_error + 200*np.sum(self.p_errors)*self.dt
+            self.torque = 40*pos_error + 2*self.filtered_d_error + 40*np.sum(self.p_errors)*self.dt
+        
+        # velocity control    
+        elif self.control_mode == 'velocity':
+            # target_pos, target_vel, status = self.minijerk_trajectory(current_t, self.start_time, self.motion_duration, self.stretch)
+            target_pos, target_vel, status = self.ramphold_trajectory(current_t, self.start_time, self.motion_duration, self.stretch)
+            error = target_vel - current_vel
+            self.p_errors.append(error)
+            # self.torque = self.KP*error + self.KD*d_error + self.KI*np.sum(self.errors)*self.dt
+            self.torque = 50*error + 0.01*d_error + 100*np.sum(self.p_errors)*self.dt
+            
+        else: # no control, test the model in a static state
+            self.torque = np.array([0.0])
             
         if abs(self.torque) > 30:
             self.torque = 30*np.sign(self.torque)
@@ -268,53 +317,38 @@ class Simulation():
         self.external_force(0, self.torque+passive_torque)
         self.log_data()
     
-def muscle_spasticity(sim, mus_select, muscle_dynamics, tau, gains, thresholds):
+def muscle_spasticity(sim, type='none', muscle_dynamics=False, tau=0.03, g=1.0, threshold=0):
     current_time = sim.timeVals[-1]
-    if current_time > tau:
-        if muscle_dynamics:
-            index = -1 - int(tau/sim.dt)
-        else:
-            index = -1
-        len_feedback = sim.muscleLen[index]
-        vel_feedback = sim.muscleVel[index]
-        force_feedback = sim.muscleForce[index]
-        
-        len_reflex = np.zeros(len(len_feedback))
-        vel_reflex = np.zeros(len(vel_feedback))
-        force_reflex = np.zeros(len(force_feedback))
-        
-        for i, enable in enumerate(mus_select):
-            if enable == 1:
-                if muscle_dynamics:
-                    b = 200 # to make the hyperbolic tangent function steep enough
-                    f = 0.5 * np.tanh(b * (len_feedback[i]-thresholds[0][i])) + 0.5
-                    len_reflex[i] = f*(len_feedback[i]-sim.starting_length[i])/(sim.starting_length[i]+sim.stretch_length[i])
-                    f = 0.5 * np.tanh(b * (vel_feedback[i]-thresholds[1][i])) + 0.5
-                    vel_reflex[i] = f*vel_feedback[i]/sim.max_velocity[i]*sim.stretch_length[i]/(sim.starting_length[i]+sim.stretch_length[i])
-                    f = 0.5 * np.tanh(b * (force_feedback[i]-thresholds[2][i])) + 0.5
-                    force_reflex[i] = f*force_feedback[i]/sim.max_force[i]
-                else:
-                    if len_feedback[i] > thresholds[0][i]:
-                        len_reflex[i] = (len_feedback[i]-thresholds[0][i])/(sim.starting_length[i]+sim.stretch_length[i])
-                    if vel_feedback[i] > thresholds[1][i]:
-                        vel_reflex[i] = (vel_feedback[i]-thresholds[1][i])/sim.max_velocity[i]*sim.stretch_length[i]/(sim.starting_length[i]+sim.stretch_length[i])*3
-                    if force_feedback[i] > thresholds[2][i]:
-                        force_reflex[i] = (force_feedback[i]-thresholds[2][i])/sim.max_force[i]*sim.stretch_length[i]/(sim.starting_length[i]+sim.stretch_length[i])*3
-                            
-        current_reflexes = np.vstack((len_reflex, vel_reflex, force_reflex))
-            
-        if muscle_dynamics:
-            # intergration to get the current excitation of the muscle
-            current_excitation = sim.muscleAct[-1]
-            excitation_derivative = spastic_excitation_with_dynamics2(current_time, current_excitation, current_reflexes, tau, gains)
-            spastic_activation = current_excitation + excitation_derivative * 0.02
-        else:
-            spastic_activation = spastic_excitation_without_dynamics2(current_reflexes, gains)
+    if type == 'ml':
+        enable = True
+        sensory_feedback = sim.muscleLen
+    elif type == 'mv':
+        enable = True
+        sensory_feedback = sim.muscleVel
+    elif type == 'mf':
+        enable = True
+        sensory_feedback = sim.muscleForce
     else:
-        spastic_activation = 0*np.ones(len(mus_select))
+        enable = False
+        sensory_feedback = sim.muscleAct
+       
+    if enable:
+        if current_time <= tau:
+            spastic_activation = 0*np.ones(len(sensory_feedback[-1]))
+        else: 
+            current_feedback = sensory_feedback[-1]
+            delayed_feedback = sensory_feedback[-1 - int(tau/sim.dt)]
+            if muscle_dynamics:
+                # intergration to get the current excitation of the muscle
+                current_excitation = sim.muscleAct[-1]
+                excitation_derivative = spastic_excitation_with_dynamics(current_time, current_excitation, current_feedback, tau, g, threshold)
+                spastic_activation = current_excitation + excitation_derivative * 0.02
+            else: 
+                spastic_activation = spastic_excitation_without_dynamics(delayed_feedback, g, threshold)
+    else:
+        spastic_activation = 0*np.ones(len(sensory_feedback[-1]))
     
-    # Explicitely project actuator space (0,1) to normalized space (-1,1), because of the setp function in MyoSuite base_v0.py
-    spastic_activation = spastic_activation*np.array(mus_select)
+    # Explicitely project actuator space (0,1) to normalized space (-1,1), because of the step function in MyoSuite base_v0.py
     spastic_activation[spastic_activation<0] = 0
     spastic_activation[spastic_activation>1] = 1
     a_max = 0.999999
@@ -338,7 +372,7 @@ def spastic_excitation_with_dynamics(t, curr_exc, current_feedback, tau, g, thre
     for i in range(len(current_feedback)):
         c1 = -curr_exc[i] / tau
         c2 = g / tau
-        f = 0.5 * np.tanh(b * (current_feedback[i] - thre[i])) + 0.5
+        f = 0.5 * np.tanh(b * (current_feedback[i] - thre)) + 0.5
         d_act[i] = c1 + c2 * current_feedback[i] * f
     return d_act
 
@@ -346,33 +380,11 @@ def spastic_excitation_with_dynamics(t, curr_exc, current_feedback, tau, g, thre
 def spastic_excitation_without_dynamics(delayed_feedback, g, thre):
     act = np.empty(len(delayed_feedback))
     for i in range(len(delayed_feedback)):
-        if delayed_feedback[i] > thre[i]:
-            act[i] = g * (delayed_feedback[i] - thre[i])
+        if delayed_feedback[i] > thre:
+            act[i] = g * (delayed_feedback[i] - thre)
         else:
             act[i] = 0.0
     return act 
-
-# spasticity model with muscle dynamics, multiple feedbacks
-def spastic_excitation_with_dynamics2(t, curr_exc, afferent_reflexes, tau, gains):
-    d_act = np.zeros(np.shape(afferent_reflexes)[1]) # the derivative of the muscle activation, six muscles
-    for j in range(np.shape(afferent_reflexes)[0]): # loop three times for three feedbacks
-        afferent_reflex = afferent_reflexes[j]
-        g = gains[j]
-        for i in range(len(afferent_reflex)):
-            c1 = -curr_exc[i] / tau
-            c2 = g / tau
-            d_act[i] = d_act[i] + c1 + c2 * afferent_reflex[i]
-    return d_act
-
-# spasticity model without muscle dynamics, multiple feedbacks
-def spastic_excitation_without_dynamics2(afferent_reflexes, gains):
-    act = np.zeros(np.shape(afferent_reflexes)[1]) # the muscle activation, six muscles
-    for j in range(np.shape(afferent_reflexes)[0]): # loop three times for three feedbacks
-        afferent_reflex = afferent_reflexes[j]
-        g = gains[j] 
-        for i in range(len(afferent_reflex)):
-            act[i] = act[i] + g * afferent_reflex[i]
-    return act
     
 def plot_curve(timeVals, data, ylabel, legend=None, ignore=False, ax=None):
     if ax is None:
@@ -393,7 +405,7 @@ def plot_curve(timeVals, data, ylabel, legend=None, ignore=False, ax=None):
         ax.legend()
     
 def save_data(name, timeVals, jointPos, muscleAct, motorTorque):
-    directory = './data/sim_data2/'
+    directory = './data/sim_data1/'
     # Create directory if it doesn't exist
     if not os.path.exists(directory):
         os.makedirs(directory)
@@ -430,12 +442,16 @@ def plot_data(sim):
     # for the error plot
     # t = np.linspace(0, sim.timeVals[-1], len(sim.v_errors))
     # plot_curve(t, sim.v_errors, 'position error [rad]')
+    
+    print(f"muscle starting length: {sim.muscleLen[0]}")
+    print(f"muscle ending length: {sim.muscleLen[-1]}")
+    print(f"muscle stretch length: {sim.muscleLen[-1] - sim.muscleLen[0]}")
         
     # Adjust layout to prevent overlap
     plt.tight_layout()
     plt.show()
 
-def spasticity_experiment(env, sim, No, pi, random_policy, mus_select = [0,0,0,0,0,0], muscle_dynamics=False, tau=0.03, g=[0, 0, 0], thre=[1, 1, 1]):
+def spasticity_experiment(env, sim, No, pi, random_policy, spasticity_type='none', muscle_dynamics=False, tau=0.03, g=2.0, threshold=0.0):
     obs = env.reset()
     sim.reset() # clean data for plotting
     # total_time = sim.end_time
@@ -448,25 +464,7 @@ def spasticity_experiment(env, sim, No, pi, random_policy, mus_select = [0,0,0,0
     a = -1*np.ones(len(a))
     a[0] = 0
     obs, r, done, ifo = env.step(a)
-    
-    # initialise the thresholds of the spasticity model
-    len_thre = sim.starting_length + thre[0]*sim.stretch_length
-    vel_thre = thre[1]*sim.max_velocity
-    force_thre = thre[2]*sim.max_force
-    thresholds = np.vstack((len_thre, vel_thre, force_thre))
-    
-    indices = [index for index, value in enumerate(g) if value > 0]
-    spasticity_types = ['ml', 'mv', 'mf']
-    if len(indices) == 1:
-        spasticity_type = spasticity_types[indices[0]]
-        Gain = g[indices[0]]
-    elif len(indices) == 2:
-        spasticity_type = 'lv'
-        Gain = g[1]
-    else:
-        spasticity_type = 'none'
-        Gain = g[0]
-    
+
     start_time = time.time()
     for i in range(total_steps-2):
         # observe the simulation
@@ -481,7 +479,7 @@ def spasticity_experiment(env, sim, No, pi, random_policy, mus_select = [0,0,0,0
         sim.log_data()
             
         # tau is the latency of the spasticity model, g is the gain of the spasticity model, threshold is the threshold of the spasticity model
-        spastic_a = muscle_spasticity(sim, mus_select, muscle_dynamics, tau, g, thresholds)
+        spastic_a = muscle_spasticity(sim, spasticity_type, muscle_dynamics, tau, g, threshold)
         # record the spastic activation, which is [-1, 1]. When it is -1, the mujoco muscle actuator will finally get 0. 
         # spas_a.append(sigmoid(spastic_a))
 
@@ -497,17 +495,7 @@ def spasticity_experiment(env, sim, No, pi, random_policy, mus_select = [0,0,0,0
     end_time = time.time()
     print(f"Time cost: {end_time-start_time}")
     
-    if mus_select == [0, 0, 0, 0, 0, 1]:
-        muscle_type = 'BRA'
-    elif mus_select == [0, 0, 0, 0, 1, 0]:
-        muscle_type = 'BICS'
-    elif mus_select == [0, 0, 0, 1, 0, 0]:
-        muscle_type = 'BICL'
-    else:
-        muscle_type = 'BBB'
-    
-    name = muscle_type + "_" + spasticity_type + f"_{Gain}" + f"_{No}"+ ".csv"
-    print(name)
+    name = "dataset_" + spasticity_type + f"_{g}" + f"_{No}"+ ".csv"
     save_data(name, sim.timeVals, sim.jointPos, sim.muscleAct, sim.torques)
     # plot_data(sim)
 
@@ -550,28 +538,27 @@ def main():
     refData = load_data()
     ref_names = refData.keys()
     
-    for model_index in range(0,3):
-        for No, ref_name in enumerate(ref_names):
-            sim.refTime = refData[ref_name]['time']
-            # sim.refAngle = np.pi - (refData[ref_name]['angle']+60)/180*np.pi # use this if you are using the reference trajectroy from the literature, ref_data_0.pkl
-            sim.refAngle = np.pi-(refData[ref_name]['angle'])/180*np.pi # use thsi if you are using the reference trajectory from Vincent, ref_data_0_1.pkl and ref_data_2_1.pkl
-            sim.refTorque = refData[ref_name]['torque']
-            sim.centre = sim.refAngle[0]
+    for No, ref_name in enumerate(ref_names):
+        sim.refTime = refData[ref_name]['time']
+        # sim.refAngle = np.pi - (refData[ref_name]['angle']+60)/180*np.pi # use this if you are using the reference trajectroy from the literature, ref_data_0.pkl
+        sim.refAngle = np.pi-(refData[ref_name]['angle'])/180*np.pi # use thsi if you are using the reference trajectory from Vincent, ref_data_0_1.pkl and ref_data_2_1.pkl
+        sim.refTorque = refData[ref_name]['torque']
+        sim.centre = sim.refAngle[0]
+        
+        for gain in range(0, 4):
+            index = No*len(ref_names) + gain
+            # ref_name = 'v150'
+            # index = 0
+            # gain = 4
+            print(f"Experiment {index}")
             
-            for i in range(1, 4, 1):
-                index = i + No*len(ref_names)
-                print(f"Experiment {index}")
-                
-                # the gains and thre_factors for three feebacks: muscle length, muscle velocity, muscle force
-                gains = [0, 0, 0]
-                gains[model_index] = i # the gain will determine the spasticity type, can be 'ml' for muscle length, 'mv' for muscle velocity, 'mf' for muscle force, 'lv' for multiple feedbacks, 'none' for no spasticity
-                
-                thre_factors = [0.1, 0.1, 0]
-                muscle_selection = [0, 0, 0, 1, 1, 1] # select the muscle to be activated, 1 for activated, 0 for deactivated, the order is TRIlong, TRIlat, TRImed, BIClong, BICshort, BRA
-                
-                # the tau is the latency of the spasticity model, g is the gain of the spasticity model, threshold is the threshold of the spasticity model
-                # tau is 30 ms set accroding to the literature, threshold is 0.05 rad/s which is considered a velocity that won't cause spasticity in literature
-                spasticity_experiment(env, sim, No, pi, random_policy, mus_select=muscle_selection, muscle_dynamics=False, tau=0.03, g=gains, thre=thre_factors)
+            # track a reference trajectory in the control mode of 'none', 'dual_old', 'dual_new', 'position'
+            sim.control_mode = 'dual_new'
+            
+            # the type can be 'ml' for muscle length, 'mv' for muscle velocity, 'mf' for muscle force, 'none' for no spasticity
+            # the tau is the latency of the spasticity model, g is the gain of the spasticity model, threshold is the threshold of the spasticity model
+            # tau is 30 ms set accroding to the literature, threshold is 0.05 rad/s which is considered a velocity that won't cause spasticity in literature
+            spasticity_experiment(env, sim, No, pi, random_policy, spasticity_type='none', muscle_dynamics=True, tau=0.03, g=gain, threshold=0.0)
     env.close()
     
 if __name__ == "__main__":

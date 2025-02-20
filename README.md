@@ -19,14 +19,16 @@ pip install -e .
 The codes for this project is in 'dev' folder: 
 1) use check_mode.ipynb to observe the model utilised in this project
 2) use test_environment.py to test the configuration and installation of your environment 
-3) new_model_validation.py is a further step of test_spasticity_model.py, which allows inputing a series of reference trajectories of elbow extension and recording the time, angle, and torque. It reads ref_data_0_1.pkl in 'data' folder. New_model_validation.py can generate the dataset of spasticity model validation saved in 'data/sim_data2'. You can observe the refernece dataset and simulation results through '/figures/ICORR_simdata2.ipynb'.
-4) We then further improved new_model_validation.py to new_model_fitting.py to find the best parameters for the hybird model of spasticity.
+3) test_spasticity_model.py is an initial version of the code for spasticity simulation, where you can understand how the spasticity model is implemented into the myosuite environment. You can define a passive movement applied by the exo on the eblow and check how the spasticity will affect the torque response of the elbow joint. 
+4) model_validation_experiment.py is a further step of test_spasticity_model.py, which allows inputing a series of reference trajectories of elbow extension and recording the time, angle, and torque. It reads ref_data_0.pkl or ref_data_0_1.pkl in 'validation_data' folder, the dataset extracted from 'Biomechanical parameters of the elbow stretch reflex in chronic hemiparetic stroke', as the reference trajectories. model_validation_experiment.py can generate the dataset of spasticity model validation saved in 'validation_data/gain_xx_x_x'. You can observe the refernece dataset and simulation results through model.validation.ipynb
+5) new_model_validation.py: an upgrade of model_validation_experiment.py, which enables the hybird model of spasticity. It allows inputing a series of reference trajectories of elbow extension and recording the time, angle, and torque. It reads ref_data_0_1.pkl in 'data' folder. New_model_validation.py can generate the dataset of spasticity model validation saved in 'data/sim_data2'. You can observe the refernece dataset and simulation results through '/figures/ICORR_simdata2.ipynb'.
+6) We then further improved new_model_validation.py to new_model_fitting.py to find the best parameters for the hybird model of spasticity (TBD).
 
 ## Dataset
 The dataset for this project is in 'data' folder: 
 1) data/passive_force: data for passive resistance calibration
-2) data/sim_data1: validation dataset for the simple spasticity model 
-3) data/sim_data2: validation dataset for the complete spasticity model
+2) data/sim_data1: validation dataset for the single-feedback spasticity model 
+3) data/sim_data2: validation dataset for the multiple-feedback spasticity model
 4) ref_data_0_1.pkl: the reference torque and angle data from a healthy people
 5) ref_data_1.csv: the reference data extracted from 'Biomechanical parameters of the elbow stretch reflex in chronic hemiparetic stroke'.
 
